@@ -50,16 +50,14 @@ const inputForm = `
       <div class="content">
         <h1>Duolingo Learned Words</h1>
         <form action="/fetch-words" method="GET">
-          <label for="userId">User ID:</label>
-          <input type="text" id="userId" name="userId" required>
-          <label for="bearerToken">Bearer Token:</label>
-          <input type="text" id="bearerToken" name="bearerToken" required>
+          <label for="jwtToken">JWT Token:</label>
+          <input type="text" id="jwtToken" name="jwtToken" required>
           <input type="submit" value="Fetch Learned Words">
         </form>
       </div>
       <footer>
         <p>
-          Your bearer token serves as a key to access the Duolingo API on behalf of your
+          Your JWT token serves as a key to access the Duolingo API on behalf of your
           account. The API requests are processed by a server-side worker running on
           Cloudflare, rather than directly from your browser.<br />
           Due to CORS restrictions, most web browsers don't allow direct cross-origin
@@ -67,14 +65,14 @@ const inputForm = `
           necessary. (If you're aware of an alternative client-side method, please let
           me know)<br />
           To optimize performance and reduce API calls, a hashed (in a not very secure
-          way) version of your user ID and bearer token, along with your learned words
-          in plain text, are cached for 10 minutes.<br />
+          way) version of your JWT token, along with your learned words in plain
+          text, are cached for 10 minutes.<br />
           You can review the source code <a href="https://github.com/6a67/duolingo-vocab-cfworker">here</a>.<br />
-          The bearer token typically remains consistent across different login sessions
+          The JWT token typically remains consistent across different login sessions
           and is only refreshed when you change your password.<br />
-          Therefore, if you are sharing your bearer token with someone else, you should
+          Therefore, if you are sharing your JWT token with someone else, you should
           change your password (even to the same you had before) to invalidate the old
-          bearer token.<br />
+          JWT token.<br />
         </p>
       </footer>
     </body>
@@ -89,21 +87,24 @@ async function handleRequest(request) {
     return respondWithHTML(inputForm);
   }
 
-  const userId = url.searchParams.get("userId");
-  const bearerToken = url.searchParams.get("bearerToken");
+  const jwtToken = url.searchParams.get("jwtToken");
 
-  if (!userId || !bearerToken) {
-    return new Response("User ID and Bearer Token are required", {
-      status: 400,
-    });
+  if (!jwtToken) {
+    return new Response("JWT Token is required", { status: 400 });
   }
 
-  const learnedWords = await getLearnedWords(userId, bearerToken);
+  const userId = decodeJWT(jwtToken)?.sub;
+
+  if (!userId) {
+    return new Response("Invalid JWT Token", { status: 400 });
+  }
+
+  const learnedWords = await getLearnedWords(userId, jwtToken);
 
   switch (path) {
     case "/fetch-words":
       return respondWithHTML(
-        generateHtmlResponse(learnedWords, userId, bearerToken)
+        generateHtmlResponse(learnedWords, userId, jwtToken)
       );
     case "/download-csv":
       return respondWithDownload(
@@ -137,6 +138,12 @@ function respondWithDownload(data, contentType, filename) {
   });
 }
 
+function decodeJWT(token) {
+  const [headerB64, payloadB64] = token.split(".");
+  const payload = JSON.parse(atob(payloadB64));
+  return payload;
+}
+
 async function hash(input) {
   const encoder = new TextEncoder();
   const data = encoder.encode(input);
@@ -149,16 +156,14 @@ async function hash(input) {
   return hashBase64;
 }
 
-async function getLearnedWords(userId, bearerToken) {
-  const cacheToken = await createCacheToken(userId, bearerToken);
-  const cacheKeyUrl = createCacheKeyUrl(cacheToken);
-  console.log("Cache Key URL:", cacheKeyUrl);
+async function getLearnedWords(userId, jwtToken) {
+  const cacheKeyUrl = await createCacheKeyUrl(jwtToken);
 
   const cachedData = await getCachedData(cacheKeyUrl);
   if (cachedData) return cachedData;
 
   try {
-    const headers = createHeaders(bearerToken);
+    const headers = createHeaders(jwtToken);
     const dump = await getDump(userId, headers);
     const { req_payload, target_language, source_language } =
       buildPayload(dump);
@@ -194,14 +199,10 @@ async function getLearnedWords(userId, bearerToken) {
   }
 }
 
-async function createCacheToken(userId, bearerToken) {
-  return `${await hash(userId)}${await hash(bearerToken)}`;
-}
-
-function createCacheKeyUrl(cacheToken) {
-  return new URL(
-    "https://example.com/" + encodeURIComponent(cacheToken)
-  ).toString();
+async function createCacheKeyUrl(token) {
+  const cacheKey = (await Promise.all(token.split(".").map(hash))).join("");
+  const encodedCacheKey = encodeURIComponent(cacheKey);
+  return "https://example.com/" + encodedCacheKey;
 }
 
 async function getCachedData(cacheKeyUrl) {
@@ -209,11 +210,11 @@ async function getCachedData(cacheKeyUrl) {
   return cacheResponse ? cacheResponse.json() : null;
 }
 
-function createHeaders(bearerToken) {
+function createHeaders(jwtToken) {
   return {
     "User-Agent":
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.3",
-    Authorization: `Bearer ${bearerToken}`,
+    Authorization: `Bearer ${jwtToken}`,
   };
 }
 
@@ -336,7 +337,7 @@ function buildPayload(dump) {
   return { req_payload, target_language, source_language };
 }
 
-function generateHtmlResponse(learnedWords, userId, bearerToken) {
+function generateHtmlResponse(learnedWords, userId, jwtToken) {
   const wordList = learnedWords
     .map(
       (word) => `
@@ -408,12 +409,12 @@ function generateHtmlResponse(learnedWords, userId, bearerToken) {
       <body>
         <h1>Learned Words</h1>
         <div class="download-links">
-          <a href="/download-csv?userId=${encodeURIComponent(
-            userId
-          )}&bearerToken=${encodeURIComponent(bearerToken)}">Download CSV</a>
-          <a href="/download-json?userId=${encodeURIComponent(
-            userId
-          )}&bearerToken=${encodeURIComponent(bearerToken)}">Download JSON</a>
+          <a href="/download-csv?jwtToken=${encodeURIComponent(
+            jwtToken
+          )}">Download CSV</a>
+          <a href="/download-json?jwtToken=${encodeURIComponent(
+            jwtToken
+          )}">Download JSON</a>
         </div>
         <br />
         <table>
